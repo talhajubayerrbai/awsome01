@@ -61,15 +61,7 @@
         mode: "0644"
         directory_mode: "0755"
 
-    - name: Check if public directory exists
-      ansible.builtin.stat:
-        path: "{{ playbook_dir }}/../public"
-      register: public_dir
-      delegate_to: localhost
-      connection: local
-      become: false
-
-    - name: Copy public directory if it exists
+    - name: Copy public directory
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../public/"
         dest: "{{ app_dir }}/public/"
@@ -77,7 +69,6 @@
         group: "{{ app_user }}"
         mode: "0644"
         directory_mode: "0755"
-      when: public_dir.stat.exists
 
     - name: Copy requirements.txt
       ansible.builtin.copy:
