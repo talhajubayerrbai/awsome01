@@ -1,0 +1,190 @@
+---
+- name: Configure Python FastAPI application
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    app_dir: /opt/app
+    venv_dir: /opt/app/.venv
+    app_user: ubuntu
+    service_name: python-app
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # System dependencies
+    # -------------------------------------------------------------------------
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install system packages
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - nginx
+          - git
+          - curl
+        state: present
+
+    # -------------------------------------------------------------------------
+    # Application directory
+    # -------------------------------------------------------------------------
+    - name: Create application directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    # -------------------------------------------------------------------------
+    # Copy application source
+    # -------------------------------------------------------------------------
+    - name: Copy main entrypoint
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../main.py"
+        dest: "{{ app_dir }}/main.py"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+
+    - name: Copy app package
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/"
+        dest: "{{ app_dir }}/app/"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+        directory_mode: "0755"
+
+    - name: Check if public directory exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../public"
+      register: public_dir
+      delegate_to: localhost
+      become: false
+
+    - name: Copy public directory if it exists
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../public/"
+        dest: "{{ app_dir }}/public/"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+        directory_mode: "0755"
+      when: public_dir.stat.exists
+
+    - name: Copy requirements.txt
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../requirements.txt"
+        dest: "{{ app_dir }}/requirements.txt"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+
+    # -------------------------------------------------------------------------
+    # Python virtual environment and dependencies
+    # -------------------------------------------------------------------------
+    - name: Create Python virtual environment
+      ansible.builtin.command:
+        cmd: python3 -m venv {{ venv_dir }}
+        creates: "{{ venv_dir }}/bin/activate"
+
+    - name: Install Python dependencies
+      ansible.builtin.pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ venv_dir }}"
+        virtualenv_command: python3 -m venv
+        state: present
+
+    - name: Ensure gunicorn is installed in venv
+      ansible.builtin.pip:
+        name:
+          - gunicorn
+          - uvicorn[standard]
+        virtualenv: "{{ venv_dir }}"
+        virtualenv_command: python3 -m venv
+        state: present
+
+    # -------------------------------------------------------------------------
+    # Systemd service
+    # -------------------------------------------------------------------------
+    - name: Create systemd service unit
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ service_name }}.service"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Python FastAPI Application
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ app_user }}
+          WorkingDirectory={{ app_dir }}
+          ExecStart={{ venv_dir }}/bin/gunicorn app.main:app \
+            -k uvicorn.workers.UvicornWorker \
+            -w 4 \
+            -b 0.0.0.0:8000
+          Restart=always
+          RestartSec=5
+          Environment=APP_ENV=production
+          Environment=PORT=8000
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and start python-app service
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        state: started
+        enabled: true
+
+    # -------------------------------------------------------------------------
+    # Nginx reverse proxy (port 80 -> 8000)
+    # -------------------------------------------------------------------------
+    - name: Remove default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Create nginx site config
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/app
+        mode: "0644"
+        content: |
+          server {
+              listen 80;
+              server_name _;
+
+              location / {
+                  proxy_pass         http://127.0.0.1:8000;
+                  proxy_http_version 1.1;
+                  proxy_set_header   Host              $host;
+                  proxy_set_header   X-Real-IP         $remote_addr;
+                  proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
+                  proxy_read_timeout 60s;
+                  proxy_connect_timeout 10s;
+              }
+          }
+
+    - name: Enable nginx site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/app
+        dest: /etc/nginx/sites-enabled/app
+        state: link
+
+    - name: Enable and restart nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+        enabled: true
