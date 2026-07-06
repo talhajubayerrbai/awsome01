@@ -66,9 +66,8 @@
         path: "{{ playbook_dir }}/../public"
       register: public_dir
       delegate_to: localhost
+      connection: local
       become: false
-      vars:
-        ansible_connection: local
 
     - name: Copy public directory if it exists
       ansible.builtin.copy:
